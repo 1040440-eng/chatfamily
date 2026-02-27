@@ -1,5 +1,8 @@
 const nodemailer = require("nodemailer");
 
+const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
+const BREVO_API_URL = process.env.BREVO_API_URL || "https://api.brevo.com/v3/smtp/email";
+const BREVO_SENDER_NAME = process.env.BREVO_SENDER_NAME || "Chat Together";
 const SMTP_HOST = process.env.SMTP_HOST || "smtp.gmail.com";
 const SMTP_PORT = Number(process.env.SMTP_PORT || 465);
 const SMTP_SECURE = String(process.env.SMTP_SECURE || "true").toLowerCase() !== "false";
@@ -34,6 +37,36 @@ function getTransporter() {
   return transporter;
 }
 
+async function sendWithBrevoApi({ to, subject, text, html }) {
+  if (typeof fetch !== "function") {
+    throw new Error("Fetch is not available in current Node runtime");
+  }
+
+  const res = await fetch(BREVO_API_URL, {
+    method: "POST",
+    headers: {
+      "api-key": BREVO_API_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      sender: {
+        email: MAIL_FROM,
+        name: BREVO_SENDER_NAME
+      },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+      textContent: text
+    })
+  });
+
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const details = payload?.message || payload?.code || "Unknown error";
+    throw new Error(`Brevo API error: ${details}`);
+  }
+}
+
 async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const normalizedCode = String(code || "").trim();
@@ -57,24 +90,35 @@ async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
     </div>
   `;
 
+  if (BREVO_API_KEY) {
+    await sendWithBrevoApi({
+      to: normalizedEmail,
+      subject,
+      text,
+      html
+    });
+    return { mocked: false, provider: "brevo" };
+  }
+
   const mailer = getTransporter();
+  if (mailer) {
+    await mailer.sendMail({
+      from: MAIL_FROM,
+      to: normalizedEmail,
+      subject,
+      text,
+      html
+    });
+    return { mocked: false, provider: "smtp" };
+  }
+
   if (!mailer) {
     if (IS_PRODUCTION) {
-      throw new Error("Email service is not configured (SMTP_USER/SMTP_PASS)");
+      throw new Error("Email service is not configured (BREVO_API_KEY or SMTP_USER/SMTP_PASS)");
     }
     console.log(`[OTP DEV] ${normalizedEmail} => ${normalizedCode}`);
     return { mocked: true };
   }
-
-  await mailer.sendMail({
-    from: MAIL_FROM,
-    to: normalizedEmail,
-    subject,
-    text,
-    html
-  });
-
-  return { mocked: false };
 }
 
 module.exports = {
