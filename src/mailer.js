@@ -1,29 +1,39 @@
-const nodemailer = require("nodemailer");
-
-const RESEND_SMTP_HOST = process.env.RESEND_SMTP_HOST || "smtp.resend.com";
-const RESEND_SMTP_PORT = Number(process.env.RESEND_SMTP_PORT || 465);
-const RESEND_SMTP_USER = process.env.RESEND_SMTP_USER || "resend";
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
+const RESEND_API_URL = process.env.RESEND_API_URL || "https://api.resend.com/emails";
 const IS_PRODUCTION = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
-let transporter = null;
+async function sendWithResendApi({ to, subject, text, html }) {
+  if (typeof fetch !== "function") {
+    throw new Error("Fetch is not available in current Node runtime");
+  }
 
-function getTransporter() {
-  if (!RESEND_API_KEY) return null;
-  if (transporter) return transporter;
-
-  transporter = nodemailer.createTransport({
-    host: RESEND_SMTP_HOST,
-    port: RESEND_SMTP_PORT,
-    secure: true,
-    auth: {
-      user: RESEND_SMTP_USER,
-      pass: RESEND_API_KEY
-    }
+  const res = await fetch(RESEND_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      from: RESEND_FROM_EMAIL,
+      to: [to],
+      subject,
+      text,
+      html
+    })
   });
 
-  return transporter;
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const details =
+      payload?.message ||
+      payload?.error?.message ||
+      payload?.name ||
+      "Unknown error";
+    throw new Error(`Resend API error: ${details}`);
+  }
+
+  return payload;
 }
 
 async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
@@ -49,8 +59,7 @@ async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
     </div>
   `;
 
-  const mailer = getTransporter();
-  if (!mailer) {
+  if (!RESEND_API_KEY) {
     if (IS_PRODUCTION) {
       throw new Error("Email service is not configured (RESEND_API_KEY)");
     }
@@ -58,8 +67,7 @@ async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
     return { mocked: true };
   }
 
-  await mailer.sendMail({
-    from: RESEND_FROM_EMAIL,
+  await sendWithResendApi({
     to: normalizedEmail,
     subject,
     text,
