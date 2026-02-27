@@ -15,6 +15,7 @@ const {
   searchUsers,
   createUser,
   createOrGetDirectChat,
+  createGroupChat,
   getChatById,
   listUserChatIds,
   isUserInChat,
@@ -57,6 +58,11 @@ function validateName(name) {
 function validatePassword(password) {
   const value = String(password || "");
   return value.length >= 4 && value.length <= 120;
+}
+
+function validateGroupTitle(value) {
+  const title = String(value || "").trim();
+  return title.length >= 2 && title.length <= 80;
 }
 
 function hashPassword(password) {
@@ -164,7 +170,7 @@ function emitNewMessage(chatId, message) {
   emitChatUpdated(chatId);
 }
 
-function sendMessageAndBroadcast({ chatId, sender, kind, text, media }) {
+function sendMessageAndBroadcast({ chatId, sender, kind, text, media, clientMessageId = null }) {
   const message = addMessage({
     chatId,
     senderId: sender.id,
@@ -173,7 +179,8 @@ function sendMessageAndBroadcast({ chatId, sender, kind, text, media }) {
     text,
     media
   });
-  emitNewMessage(chatId, message);
+  const outboundMessage = clientMessageId ? { ...message, clientMessageId } : message;
+  emitNewMessage(chatId, outboundMessage);
   return message;
 }
 
@@ -365,6 +372,69 @@ app.post("/api/chats/direct", authMiddleware, (req, res) => {
   }
 });
 
+app.post("/api/chats/group", authMiddleware, (req, res) => {
+  const user = getUserById(req.auth.userId);
+  if (!user) {
+    return res.status(401).json({ error: "Пользователь не найден" });
+  }
+
+  const title = String(req.body?.title || "").trim();
+  if (!validateGroupTitle(title)) {
+    return res.status(400).json({ error: "Название группы: от 2 до 80 символов" });
+  }
+
+  const rawNames = Array.isArray(req.body?.memberNames) ? req.body.memberNames : [];
+  const uniqueNames = [...new Set(rawNames.map((n) => String(n || "").trim()).filter(Boolean))];
+  if (uniqueNames.length < 2) {
+    return res.status(400).json({ error: "Укажите минимум 2 участников по имени" });
+  }
+
+  const foundUsers = [];
+  const missingNames = [];
+  for (const name of uniqueNames) {
+    const member = getUserByName(name);
+    if (!member) {
+      missingNames.push(name);
+      continue;
+    }
+    if (member.id === user.id) continue;
+    foundUsers.push(member);
+  }
+
+  if (missingNames.length > 0) {
+    return res.status(404).json({
+      error: `Не найдены пользователи: ${missingNames.join(", ")}`
+    });
+  }
+
+  try {
+    const groupChat = createGroupChat({
+      title,
+      participantIds: foundUsers.map((u) => u.id),
+      creatorId: user.id
+    });
+    emitChatUpdated(groupChat.id);
+
+    const summary = listChatsForUser(user.id).find((c) => c.id === groupChat.id);
+    return res.status(201).json({
+      chat:
+        summary || {
+          id: groupChat.id,
+          type: "group",
+          title: groupChat.title,
+          participantIds: groupChat.participantIds,
+          contact: null,
+          members: getChatParticipants(groupChat.id),
+          updatedAt: groupChat.updatedAt,
+          lastMessage: null,
+          unreadCount: 0
+        }
+    });
+  } catch (err) {
+    return res.status(400).json({ error: err.message || "Не удалось создать группу" });
+  }
+});
+
 app.get("/api/chats", authMiddleware, (req, res) => {
   const user = getUserById(req.auth.userId);
   if (!user) {
@@ -500,6 +570,7 @@ io.on("connection", (socket) => {
 
   socket.on("send_message", (payload, ack) => {
     const chatId = String(payload?.chatId || "").trim();
+    const clientMessageId = String(payload?.clientMessageId || "").trim();
     const kind = normalizeMessageKind(payload?.kind, payload?.media?.mimeType);
     const text = sanitizeText(payload?.text || "");
     const media =
@@ -527,9 +598,16 @@ io.on("connection", (socket) => {
         sender: user,
         kind,
         text,
-        media
+        media,
+        clientMessageId: clientMessageId || null
       });
-      if (typeof ack === "function") ack({ ok: true, messageId: message.id });
+      if (typeof ack === "function") {
+        ack({
+          ok: true,
+          messageId: message.id,
+          clientMessageId: clientMessageId || null
+        });
+      }
     } catch (err) {
       if (typeof ack === "function") ack({ error: err.message || "Ошибка отправки" });
     }

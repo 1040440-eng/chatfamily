@@ -173,6 +173,42 @@ function createOrGetDirectChat(userA, userB) {
   return chat;
 }
 
+function normalizeParticipantIds(ids) {
+  return [...new Set((Array.isArray(ids) ? ids : []).map((id) => String(id || "").trim()).filter(Boolean))];
+}
+
+function createGroupChat({ title, participantIds, creatorId }) {
+  const normalizedTitle = String(title || "").trim();
+  const ids = normalizeParticipantIds([...(participantIds || []), creatorId]);
+
+  if (normalizedTitle.length < 2 || normalizedTitle.length > 80) {
+    throw new Error("Название группы должно быть от 2 до 80 символов");
+  }
+  if (ids.length < 3) {
+    throw new Error("Для группового чата нужно минимум 3 участника");
+  }
+
+  const data = readData();
+  const hasUnknown = ids.some((id) => !data.users.some((u) => u.id === id));
+  if (hasUnknown) {
+    throw new Error("Некоторые участники не найдены");
+  }
+
+  const chat = {
+    id: crypto.randomUUID(),
+    type: "group",
+    title: normalizedTitle,
+    participantIds: ids,
+    createdBy: creatorId,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  data.chats.push(chat);
+  writeData(data);
+  return chat;
+}
+
 function getChatById(chatId) {
   const data = readData();
   return data.chats.find((c) => c.id === chatId) || null;
@@ -318,16 +354,21 @@ function listChatsForUser(userId) {
     .map((chat) => {
       const otherUserId = chat.participantIds.find((id) => id !== userId) || null;
       const otherUser = data.users.find((u) => u.id === otherUserId) || null;
+      const memberUsers = data.users.filter((u) => chat.participantIds.includes(u.id));
 
       const messages = data.messages.filter((m) => m.chatId === chat.id);
       const lastMessageRaw = messages[messages.length - 1] || null;
       const lastMessage = lastMessageRaw ? normalizeMessage(lastMessageRaw) : null;
 
+      const isGroup = chat.type === "group";
+
       return {
         id: chat.id,
-        type: chat.type,
+        type: isGroup ? "group" : "direct",
+        title: isGroup ? String(chat.title || "").trim() || "Группа" : null,
         participantIds: chat.participantIds,
-        contact: otherUser ? toPublicUser(otherUser) : null,
+        contact: !isGroup && otherUser ? toPublicUser(otherUser) : null,
+        members: isGroup ? memberUsers.map(toPublicUser) : null,
         updatedAt: lastMessage?.createdAt || chat.updatedAt || chat.createdAt,
         lastMessage: lastMessage
           ? {
@@ -363,6 +404,7 @@ module.exports = {
   searchUsers,
   createUser,
   createOrGetDirectChat,
+  createGroupChat,
   getChatById,
   listUserChatIds,
   isUserInChat,
