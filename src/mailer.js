@@ -5,6 +5,7 @@ const RESEND_SMTP_PORT = Number(process.env.RESEND_SMTP_PORT || 465);
 const RESEND_SMTP_USER = process.env.RESEND_SMTP_USER || "resend";
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
+const IS_PRODUCTION = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
 let transporter = null;
 
@@ -50,6 +51,9 @@ async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
 
   const mailer = getTransporter();
   if (!mailer) {
+    if (IS_PRODUCTION) {
+      throw new Error("Email service is not configured (RESEND_API_KEY)");
+    }
     console.log(`[OTP DEV] ${normalizedEmail} => ${normalizedCode}`);
     return { mocked: true };
   }
@@ -68,4 +72,3 @@ async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
 module.exports = {
   sendLoginCodeEmail
 };
-
