@@ -1,0 +1,4 @@
+node_modules/
+data/chat-data.json
+uploads/
+.env
