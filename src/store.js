@@ -84,7 +84,7 @@ function searchUsers(query, excludeUserId) {
     .map(toPublicUser);
 }
 
-function createUser({ name, email, passwordHash }) {
+function createUser({ name, email, passwordHash = null }) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const normalizedName = String(name || "").trim();
   const data = readData();
@@ -349,4 +349,3 @@ module.exports = {
   normalizeMessage,
   toPublicUser
 };
-

@@ -1,10 +1,11 @@
+require("dotenv").config();
+
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
-const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const { Server } = require("socket.io");
 
@@ -25,6 +26,8 @@ const {
   toPublicUser
 } = require("./store");
 const { signToken, verifyToken, authMiddleware } = require("./auth");
+const { issueOtp, verifyOtp } = require("./otp");
+const { sendLoginCodeEmail } = require("./mailer");
 
 const PORT = Number(process.env.PORT || 4000);
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
@@ -215,48 +218,68 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
-app.post("/api/register", async (req, res) => {
-  const name = String(req.body?.name || "").trim();
+app.post("/api/auth/send-code", async (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
-  const password = String(req.body?.password || "");
-
-  if (name.length < 2) {
-    return res.status(400).json({ error: "Имя должно быть не короче 2 символов" });
+  if (!validateEmail(email)) {
+    return res.status(400).json({ error: "Укажите корректный email" });
   }
+
+  const issued = issueOtp(email);
+  if (!issued.ok) {
+    return res
+      .status(429)
+      .json({ error: `Повторная отправка через ${issued.retryAfterSec} сек` });
+  }
+
+  try {
+    await sendLoginCodeEmail({
+      email,
+      code: issued.code,
+      ttlMinutes: Math.round(issued.ttlSec / 60)
+    });
+    return res.json({
+      ok: true,
+      retryAfterSec: issued.retryAfterSec
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "Не удалось отправить код" });
+  }
+});
+
+app.post("/api/auth/verify-code", async (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const code = String(req.body?.code || "").trim();
+  const name = String(req.body?.name || "").trim();
 
   if (!validateEmail(email)) {
     return res.status(400).json({ error: "Укажите корректный email" });
   }
 
-  if (password.length < 6) {
-    return res.status(400).json({ error: "Пароль должен быть не короче 6 символов" });
+  if (!/^\d{6}$/.test(code)) {
+    return res.status(400).json({ error: "Код должен состоять из 6 цифр" });
   }
 
-  try {
-    const passwordHash = await bcrypt.hash(password, 10);
-    const publicUser = createUser({ name, email, passwordHash });
-    return res.status(201).json(buildAuthResponse(publicUser));
-  } catch (err) {
-    return res.status(409).json({ error: err.message || "Не удалось создать пользователя" });
-  }
-});
-
-app.post("/api/login", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
-  const password = String(req.body?.password || "");
-
-  if (!validateEmail(email) || !password) {
-    return res.status(400).json({ error: "Проверьте email и пароль" });
+  let user = getUserByEmail(email);
+  if (!user && name.length < 2) {
+    return res.status(400).json({ error: "Для регистрации укажите имя (минимум 2 символа)" });
   }
 
-  const user = getUserByEmail(email);
+  const result = verifyOtp(email, code);
+  if (!result.ok) {
+    return res.status(401).json({ error: result.error || "Неверный код" });
+  }
+
   if (!user) {
-    return res.status(401).json({ error: "Неверный email или пароль" });
-  }
-
-  const ok = await bcrypt.compare(password, user.passwordHash);
-  if (!ok) {
-    return res.status(401).json({ error: "Неверный email или пароль" });
+    try {
+      const publicUser = createUser({
+        name,
+        email,
+        passwordHash: null
+      });
+      return res.status(201).json(buildAuthResponse(publicUser));
+    } catch (err) {
+      return res.status(409).json({ error: err.message || "Не удалось создать пользователя" });
+    }
   }
 
   return res.json(buildAuthResponse(toPublicUser(user)));
@@ -676,4 +699,3 @@ io.on("connection", (socket) => {
 server.listen(PORT, () => {
   console.log(`Chat backend started on http://localhost:${PORT}`);
 });
-
