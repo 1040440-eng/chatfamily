@@ -14,6 +14,7 @@ function signToken(user) {
     {
       sub: user.id,
       name: user.name,
+      login: user.login || user.name,
       email: user.email
     },
     JWT_SECRET,
@@ -44,6 +45,7 @@ function authMiddleware(req, res, next) {
     req.auth = {
       userId: payload.sub,
       name: payload.name,
+      login: payload.login,
       email: payload.email
     };
     return next();
@@ -58,4 +60,3 @@ module.exports = {
   getBearerToken,
   authMiddleware
 };
-

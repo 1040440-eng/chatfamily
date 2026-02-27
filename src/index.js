@@ -10,7 +10,7 @@ const multer = require("multer");
 const { Server } = require("socket.io");
 
 const {
-  getUserByEmail,
+  getUserByName,
   getUserById,
   searchUsers,
   createUser,
@@ -26,8 +26,6 @@ const {
   toPublicUser
 } = require("./store");
 const { signToken, verifyToken, authMiddleware } = require("./auth");
-const { issueOtp, verifyOtp } = require("./otp");
-const { sendLoginCodeEmail } = require("./mailer");
 
 const PORT = Number(process.env.PORT || 4000);
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
@@ -51,9 +49,33 @@ function buildAuthResponse(publicUser) {
   };
 }
 
-function validateEmail(email) {
-  const value = String(email || "").trim().toLowerCase();
-  return value.length >= 5 && value.includes("@");
+function validateName(name) {
+  const value = String(name || "").trim();
+  return value.length >= 2 && value.length <= 40;
+}
+
+function validatePassword(password) {
+  const value = String(password || "");
+  return value.length >= 4 && value.length <= 120;
+}
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(String(password || ""), salt, 64).toString("hex");
+  return `scrypt$${salt}$${hash}`;
+}
+
+function verifyPassword(password, storedHash) {
+  const raw = String(storedHash || "");
+  const parts = raw.split("$");
+  if (parts.length !== 3 || parts[0] !== "scrypt") return false;
+  const [, salt, hashHex] = parts;
+  if (!salt || !hashHex) return false;
+
+  const hashBuffer = Buffer.from(hashHex, "hex");
+  const calculated = crypto.scryptSync(String(password || ""), salt, hashBuffer.length);
+  if (calculated.length !== hashBuffer.length) return false;
+  return crypto.timingSafeEqual(calculated, hashBuffer);
 }
 
 function sanitizeText(value) {
@@ -218,68 +240,65 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
-app.post("/api/auth/send-code", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
-  if (!validateEmail(email)) {
-    return res.status(400).json({ error: "Укажите корректный email" });
+app.post("/api/auth/register", (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  const password = String(req.body?.password || "");
+
+  if (!validateName(name)) {
+    return res
+      .status(400)
+      .json({ error: "Имя должно быть от 2 до 40 символов" });
+  }
+  if (!validatePassword(password)) {
+    return res
+      .status(400)
+      .json({ error: "Пароль должен быть от 4 до 120 символов" });
   }
 
-  const issued = issueOtp(email);
-  if (!issued.ok) {
-    return res
-      .status(429)
-      .json({ error: `Повторная отправка через ${issued.retryAfterSec} сек` });
+  if (getUserByName(name)) {
+    return res.status(409).json({ error: "Пользователь с таким именем уже существует" });
   }
 
   try {
-    await sendLoginCodeEmail({
-      email,
-      code: issued.code,
-      ttlMinutes: Math.round(issued.ttlSec / 60)
+    const publicUser = createUser({
+      name,
+      login: name,
+      passwordHash: hashPassword(password)
     });
-    return res.json({
-      ok: true,
-      retryAfterSec: issued.retryAfterSec
-    });
+    return res.status(201).json(buildAuthResponse(publicUser));
   } catch (err) {
-    return res.status(500).json({ error: err.message || "Не удалось отправить код" });
+    return res.status(409).json({ error: err.message || "Не удалось создать пользователя" });
   }
 });
 
-app.post("/api/auth/verify-code", async (req, res) => {
-  const email = String(req.body?.email || "").trim().toLowerCase();
-  const code = String(req.body?.code || "").trim();
+app.post("/api/auth/login", (req, res) => {
   const name = String(req.body?.name || "").trim();
+  const password = String(req.body?.password || "");
 
-  if (!validateEmail(email)) {
-    return res.status(400).json({ error: "Укажите корректный email" });
+  if (!validateName(name)) {
+    return res
+      .status(400)
+      .json({ error: "Укажите корректное имя пользователя" });
+  }
+  if (!validatePassword(password)) {
+    return res
+      .status(400)
+      .json({ error: "Укажите корректный пароль" });
   }
 
-  if (!/^\d{6}$/.test(code)) {
-    return res.status(400).json({ error: "Код должен состоять из 6 цифр" });
-  }
-
-  let user = getUserByEmail(email);
-  if (!user && name.length < 2) {
-    return res.status(400).json({ error: "Для регистрации укажите имя (минимум 2 символа)" });
-  }
-
-  const result = verifyOtp(email, code);
-  if (!result.ok) {
-    return res.status(401).json({ error: result.error || "Неверный код" });
-  }
-
+  const user = getUserByName(name);
   if (!user) {
-    try {
-      const publicUser = createUser({
-        name,
-        email,
-        passwordHash: null
-      });
-      return res.status(201).json(buildAuthResponse(publicUser));
-    } catch (err) {
-      return res.status(409).json({ error: err.message || "Не удалось создать пользователя" });
-    }
+    return res.status(401).json({ error: "Неверное имя или пароль" });
+  }
+  if (!user.passwordHash) {
+    return res
+      .status(401)
+      .json({ error: "Для этого аккаунта пароль не установлен. Создайте новый аккаунт" });
+  }
+
+  const ok = verifyPassword(password, user.passwordHash);
+  if (!ok) {
+    return res.status(401).json({ error: "Неверное имя или пароль" });
   }
 
   return res.json(buildAuthResponse(toPublicUser(user)));
@@ -315,14 +334,16 @@ app.post("/api/chats/direct", authMiddleware, (req, res) => {
     return res.status(401).json({ error: "Пользователь не найден" });
   }
 
-  const email = String(req.body?.email || "").trim().toLowerCase();
-  if (!validateEmail(email)) {
-    return res.status(400).json({ error: "Укажите корректный email контакта" });
+  const contactName = String(req.body?.name || "").trim();
+  if (!validateName(contactName)) {
+    return res
+      .status(400)
+      .json({ error: "Укажите корректное имя контакта" });
   }
 
-  const otherUser = getUserByEmail(email);
+  const otherUser = getUserByName(contactName);
   if (!otherUser) {
-    return res.status(404).json({ error: "Пользователь с таким email не найден" });
+    return res.status(404).json({ error: "Пользователь с таким именем не найден" });
   }
 
   try {
@@ -459,6 +480,7 @@ io.use((socket, next) => {
     socket.data.user = {
       id: user.id,
       name: user.name,
+      login: user.login || user.name,
       email: user.email
     };
     return next();

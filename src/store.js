@@ -56,15 +56,28 @@ function toPublicUser(user) {
   return {
     id: user.id,
     name: user.name,
+    login: user.login || user.name,
     email: user.email,
     createdAt: user.createdAt
   };
 }
 
+function normalizeLogin(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
 function getUserByEmail(email) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const data = readData();
-  return data.users.find((u) => u.email === normalizedEmail) || null;
+  return data.users.find((u) => String(u.email || "").toLowerCase() === normalizedEmail) || null;
+}
+
+function getUserByName(name) {
+  const normalized = normalizeLogin(name);
+  const data = readData();
+  return data.users.find((u) => normalizeLogin(u.login || u.name) === normalized) || null;
 }
 
 function getUserById(userId) {
@@ -79,24 +92,35 @@ function searchUsers(query, excludeUserId) {
   const data = readData();
   return data.users
     .filter((u) => u.id !== excludeUserId)
-    .filter((u) => u.email.includes(q) || u.name.toLowerCase().includes(q))
+    .filter((u) => {
+      const normalizedName = String(u.name || "").toLowerCase();
+      const normalizedLogin = normalizeLogin(u.login || u.name);
+      const normalizedEmail = String(u.email || "").toLowerCase();
+      return (
+        normalizedName.includes(q) ||
+        normalizedLogin.includes(q) ||
+        normalizedEmail.includes(q)
+      );
+    })
     .slice(0, 20)
     .map(toPublicUser);
 }
 
-function createUser({ name, email, passwordHash = null }) {
-  const normalizedEmail = String(email || "").trim().toLowerCase();
+function createUser({ name, login, email = null, passwordHash = null }) {
+  const normalizedLogin = normalizeLogin(login || name);
   const normalizedName = String(name || "").trim();
+  const normalizedEmail = String(email || "").trim().toLowerCase() || null;
   const data = readData();
 
-  const existing = data.users.find((u) => u.email === normalizedEmail);
+  const existing = data.users.find((u) => normalizeLogin(u.login || u.name) === normalizedLogin);
   if (existing) {
-    throw new Error("Пользователь с таким email уже существует");
+    throw new Error("Пользователь с таким именем уже существует");
   }
 
   const user = {
     id: crypto.randomUUID(),
     name: normalizedName,
+    login: normalizedLogin,
     email: normalizedEmail,
     passwordHash,
     createdAt: new Date().toISOString()
@@ -334,6 +358,7 @@ function getChatParticipants(chatId) {
 
 module.exports = {
   getUserByEmail,
+  getUserByName,
   getUserById,
   searchUsers,
   createUser,
