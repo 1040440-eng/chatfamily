@@ -1,39 +1,37 @@
-const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
-const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
-const RESEND_API_URL = process.env.RESEND_API_URL || "https://api.resend.com/emails";
+const nodemailer = require("nodemailer");
+
+const SMTP_HOST = process.env.SMTP_HOST || "smtp.gmail.com";
+const SMTP_PORT = Number(process.env.SMTP_PORT || 465);
+const SMTP_SECURE = String(process.env.SMTP_SECURE || "true").toLowerCase() !== "false";
+const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || "";
+const MAIL_FROM = process.env.MAIL_FROM || SMTP_USER || "no-reply@chat-together.local";
 const IS_PRODUCTION = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
-async function sendWithResendApi({ to, subject, text, html }) {
-  if (typeof fetch !== "function") {
-    throw new Error("Fetch is not available in current Node runtime");
+let transporter = null;
+
+function getTransporter() {
+  if (!SMTP_USER || !SMTP_PASS) {
+    return null;
+  }
+  if (transporter) {
+    return transporter;
   }
 
-  const res = await fetch(RESEND_API_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${RESEND_API_KEY}`,
-      "Content-Type": "application/json"
+  transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS
     },
-    body: JSON.stringify({
-      from: RESEND_FROM_EMAIL,
-      to: [to],
-      subject,
-      text,
-      html
-    })
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000
   });
 
-  const payload = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const details =
-      payload?.message ||
-      payload?.error?.message ||
-      payload?.name ||
-      "Unknown error";
-    throw new Error(`Resend API error: ${details}`);
-  }
-
-  return payload;
+  return transporter;
 }
 
 async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
@@ -59,15 +57,17 @@ async function sendLoginCodeEmail({ email, code, ttlMinutes = 10 }) {
     </div>
   `;
 
-  if (!RESEND_API_KEY) {
+  const mailer = getTransporter();
+  if (!mailer) {
     if (IS_PRODUCTION) {
-      throw new Error("Email service is not configured (RESEND_API_KEY)");
+      throw new Error("Email service is not configured (SMTP_USER/SMTP_PASS)");
     }
     console.log(`[OTP DEV] ${normalizedEmail} => ${normalizedCode}`);
     return { mocked: true };
   }
 
-  await sendWithResendApi({
+  await mailer.sendMail({
+    from: MAIL_FROM,
     to: normalizedEmail,
     subject,
     text,
